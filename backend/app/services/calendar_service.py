@@ -1,4 +1,3 @@
-
 import os
 from datetime import datetime, timedelta, time, date
 import pytz
@@ -6,6 +5,8 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import logging
+import re
+from dateutil import parser
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -22,6 +23,143 @@ APPOINTMENT_DURATION = int(os.getenv('APPOINTMENT_DURATION_MINUTES', 60))  # 60 
 BUFFER_TIME = int(os.getenv('BUFFER_TIME_MINUTES', 15))  # 15 minutes buffer between appointments
 # Using 'Asia/Karachi' which is the standard IANA timezone for Pakistan
 LAHORE_TZ = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Karachi'))
+
+def parse_natural_date(date_input):
+    """
+    Parse natural language dates like 'monday', 'tomorrow', etc.
+    Always returns future dates for booking context
+    """
+    today = datetime.now(LAHORE_TZ).date()
+    date_input = date_input.lower().strip()
+    
+    logger.info(f"🔍 Parsing natural date: '{date_input}' (today is {today})")
+    
+    # Handle 'today' - but only if it's not past business hours
+    if 'today' in date_input:
+        current_hour = datetime.now(LAHORE_TZ).hour
+        if current_hour < CLINIC_CLOSE_HOUR and not is_weekend(today):
+            return today
+        else:
+            # If today is past business hours or weekend, suggest tomorrow
+            tomorrow = today + timedelta(days=1)
+            while is_weekend(tomorrow):
+                tomorrow += timedelta(days=1)
+            logger.info(f"⚠️ Today is past business hours or weekend, suggesting {tomorrow}")
+            return tomorrow
+    
+    # Handle 'tomorrow'
+    if 'tomorrow' in date_input:
+        tomorrow = today + timedelta(days=1)
+        if is_weekend(tomorrow):
+            # Skip to next business day
+            while is_weekend(tomorrow):
+                tomorrow += timedelta(days=1)
+        return tomorrow
+    
+    # Handle day names (monday, tuesday, etc.)
+    days_of_week = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3, 
+        'friday': 4, 'saturday': 5, 'sunday': 6
+    }
+    
+    for day_name, day_num in days_of_week.items():
+        if day_name in date_input:
+            # Find the next occurrence of this day
+            current_weekday = today.weekday()
+            days_ahead = (day_num - current_weekday) % 7
+            
+            # If it's the same day but past business hours, get next week
+            if days_ahead == 0:
+                current_hour = datetime.now(LAHORE_TZ).hour
+                if current_hour >= CLINIC_CLOSE_HOUR:
+                    days_ahead = 7
+            
+            # If days_ahead is 0, it means today - but we want future dates
+            if days_ahead == 0:
+                days_ahead = 7
+                
+            target_date = today + timedelta(days=days_ahead)
+            
+            # Skip Sunday (we're closed)
+            if target_date.weekday() == 6:  # Sunday
+                target_date += timedelta(days=1)  # Move to Monday
+                
+            logger.info(f"✅ '{day_name}' parsed as {target_date}")
+            return target_date
+    
+    # Handle 'next week' 
+    if 'next week' in date_input:
+        target_date = today + timedelta(days=7)
+        while is_weekend(target_date):
+            target_date += timedelta(days=1)
+        return target_date
+    
+    # Try to parse as regular date
+    try:
+        # Handle various date formats
+        parsed_date = parser.parse(date_input, default=datetime.now()).date()
+        
+        # Ensure it's in the future
+        if parsed_date <= today:
+            # If someone says "July 21" and it's past, assume next year
+            if parsed_date.month <= today.month and parsed_date.day <= today.day:
+                parsed_date = parsed_date.replace(year=today.year + 1)
+            else:
+                parsed_date = parsed_date.replace(year=today.year)
+        
+        # Skip Sunday if needed
+        if is_weekend(parsed_date):
+            parsed_date += timedelta(days=1)
+            
+        logger.info(f"✅ Date parsed as {parsed_date}")
+        return parsed_date
+        
+    except Exception as e:
+        logger.error(f"❌ Could not parse date '{date_input}': {e}")
+        # Return tomorrow as fallback
+        tomorrow = today + timedelta(days=1)
+        while is_weekend(tomorrow):
+            tomorrow += timedelta(days=1)
+        return tomorrow
+
+def validate_phone_number(phone):
+    """
+    Validate phone number format for Pakistan
+    """
+    if not phone:
+        return False
+    
+    # Remove spaces, dashes, and parentheses
+    clean_phone = re.sub(r'[\s\-\(\)]+', '', phone)
+    
+    # Pakistan phone number patterns
+    patterns = [
+        r'^\+92[0-9]{10}$',          # +92xxxxxxxxxx
+        r'^92[0-9]{10}$',            # 92xxxxxxxxxx  
+        r'^0[0-9]{10}$',             # 0xxxxxxxxxx
+        r'^[0-9]{11}$',              # xxxxxxxxxxx
+        r'^\+92\-[0-9]{3}\-[0-9]{7}$', # +92-xxx-xxxxxxx
+    ]
+    
+    for pattern in patterns:
+        if re.match(pattern, clean_phone):
+            return True
+    
+    # Also accept basic 10+ digit numbers
+    if len(clean_phone) >= 10 and clean_phone.isdigit():
+        return True
+        
+    return False
+
+def validate_email(email):
+    """
+    Validate email format
+    """
+    if not email:
+        return True  # Email is optional
+    
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
 
 def get_calendar_service():
     """Initialize Google Calendar service with proper error handling"""
@@ -159,8 +297,22 @@ def check_time_conflict(requested_start, requested_end, existing_events):
     return False, None
 
 def generate_alternative_slots(requested_date, duration_minutes=APPOINTMENT_DURATION):
-    """Generate alternative available time slots for the requested date"""
+    """
+    Generate alternative available time slots for the requested date
+    Only return slots that actually have availability
+    """
     try:
+        # Don't generate slots for dates with no availability
+        if is_weekend(requested_date):
+            logger.info(f"❌ {requested_date} is Sunday (closed) - no slots generated")
+            return []
+        
+        # Check if date is in the past
+        today = datetime.now(LAHORE_TZ).date()
+        if requested_date < today:
+            logger.info(f"❌ {requested_date} is in the past - no slots generated")
+            return []
+        
         # Get existing appointments
         existing_events = get_existing_appointments(requested_date)
         
@@ -170,6 +322,13 @@ def generate_alternative_slots(requested_date, duration_minutes=APPOINTMENT_DURA
         slots = []
         current_time = datetime.combine(requested_date, time(CLINIC_OPEN_HOUR, 0)).replace(tzinfo=LAHORE_TZ)
         end_time = datetime.combine(requested_date, time(CLINIC_CLOSE_HOUR, 0)).replace(tzinfo=LAHORE_TZ)
+        
+        # If checking today, start from current time + 1 hour
+        if requested_date == today:
+            now = datetime.now(LAHORE_TZ)
+            earliest_time = now + timedelta(hours=1)  # At least 1 hour notice
+            if earliest_time > current_time:
+                current_time = earliest_time.replace(minute=0 if earliest_time.minute < 30 else 30, second=0, microsecond=0)
         
         while current_time + timedelta(minutes=duration_minutes) <= end_time:
             slot_end = current_time + timedelta(minutes=duration_minutes)
@@ -181,7 +340,8 @@ def generate_alternative_slots(requested_date, duration_minutes=APPOINTMENT_DURA
                 slots.append({
                     'start_time': current_time.isoformat(),  # Store as ISO string with timezone
                     'end_time': slot_end.isoformat(),
-                    'formatted_time': current_time.strftime('%I:%M %p')
+                    'formatted_time': current_time.strftime('%I:%M %p'),
+                    'time_24h': current_time.strftime('%H:%M')  # Add 24-hour format for easier matching
                 })
                 logger.info(f"  ✓ Available slot: {current_time.strftime('%I:%M %p')}")
             else:
@@ -191,7 +351,7 @@ def generate_alternative_slots(requested_date, duration_minutes=APPOINTMENT_DURA
             # Move to next 30-minute slot
             current_time += timedelta(minutes=30)
         
-        logger.info(f"Generated {len(slots)} available slots")
+        logger.info(f"Generated {len(slots)} available slots for {requested_date}")
         return slots
         
     except Exception as e:
@@ -203,6 +363,20 @@ def book_appointment(patient_name, patient_phone, appointment_date, appointment_
     Book an appointment with conflict checking and validation
     """
     try:
+        # Input validation first
+        if not patient_name or not patient_phone:
+            return {
+                'success': False,
+                'message': 'Patient name and phone number are required.'
+            }
+        
+        # Validate phone number format
+        if not validate_phone_number(patient_phone):
+            return {
+                'success': False,
+                'message': 'Please provide a valid phone number (e.g., +92-321-1234567 or 0321-1234567).'
+            }
+        
         # Combine date and time with proper timezone
         # First create a naive datetime in local time
         naive_datetime = datetime.combine(appointment_date, appointment_time)
@@ -316,7 +490,7 @@ Booked via AI Receptionist
         }
 
 def validate_appointment_request(start_datetime, end_datetime):
-    """Validate appointment request against business rules - FIXED"""
+    """Validate appointment request against business rules"""
     
     # Check if it's in the past
     now = datetime.now(LAHORE_TZ)
@@ -335,7 +509,7 @@ def validate_appointment_request(start_datetime, end_datetime):
             'message': f'Appointments can only be booked between {CLINIC_OPEN_HOUR}:00 AM and {CLINIC_CLOSE_HOUR}:00 PM.'
         }
     
-    # FIXED: Check if it's on weekend (Sunday only)
+    # Check if it's on weekend (Sunday only)
     if is_weekend(start_datetime.date()):
         return {
             'valid': False,
@@ -354,9 +528,11 @@ def validate_appointment_request(start_datetime, end_datetime):
     return {'valid': True}
 
 def get_available_slots_for_date(requested_date, duration_minutes=APPOINTMENT_DURATION):
-    """Get all available slots for a specific date - FIXED"""
+    """
+    Get all available slots for a specific date - only return if slots exist
+    """
     
-    # FIXED: Validate the date first with correct weekend logic
+    # Validate the date first with correct weekend logic
     if is_weekend(requested_date):
         return {
             'success': False,
@@ -374,6 +550,14 @@ def get_available_slots_for_date(requested_date, duration_minutes=APPOINTMENT_DU
         }
     
     slots = generate_alternative_slots(requested_date, duration_minutes)
+    
+    # Only return success if slots actually exist
+    if len(slots) == 0:
+        return {
+            'success': False,
+            'message': f'No available slots for {requested_date.strftime("%B %d, %Y")}. Please choose a different date.',
+            'available_slots': []
+        }
     
     return {
         'success': True,
@@ -420,21 +604,27 @@ def check_today_availability():
     }
 
 def get_next_few_days_availability(days=3):
-    """Get availability for the next few days"""
+    """
+    Get availability for the next few days - only include days with actual slots
+    """
     today = datetime.now(LAHORE_TZ).date()
     availability = {}
     
-    for i in range(1, days + 1):  # Start from tomorrow
+    for i in range(1, days + 8):  # Check more days to find available ones
         check_date = today + timedelta(days=i)
         
         if not is_weekend(check_date):  # Skip Sundays
             slots = generate_alternative_slots(check_date)
-            if slots:
+            if slots:  # Only include if slots are available
                 availability[check_date.strftime('%Y-%m-%d')] = {
                     'date': check_date.strftime('%B %d, %Y'),
                     'day': check_date.strftime('%A'),
                     'slots': slots[:5]  # First 5 slots
                 }
+                
+                # Stop once we have enough days with availability
+                if len(availability) >= days:
+                    break
     
     return availability
 
@@ -459,6 +649,12 @@ def test_calendar_connection():
         # Test today's availability
         today_avail = check_today_availability()
         print(f"✅ Today's availability: {today_avail['available']} ({len(today_avail['slots'])} slots)")
+        
+        # Test natural date parsing
+        test_dates = ['monday', 'tomorrow', 'next week', 'friday']
+        for test_date in test_dates:
+            parsed = parse_natural_date(test_date)
+            print(f"✅ '{test_date}' -> {parsed}")
         
         return True
         

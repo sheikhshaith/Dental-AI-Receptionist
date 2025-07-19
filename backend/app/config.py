@@ -80,6 +80,7 @@
 #     """Testing configuration"""
 #     TESTING = True
 #     LOG_LEVEL = 'DEBUG'
+# config.py
 
 """ Configuration settings for the Dental Office AI Receptionist """
 import os

@@ -12,46 +12,21 @@ const ChatBot = () => {
   const [isLoading, setIsLoading] = useState(false)
   const [userData, setUserData] = useState({})
   const [availableSlots, setAvailableSlots] = useState([])
+  const [showButtons, setShowButtons] = useState(false)
+  const [buttonOptions, setButtonOptions] = useState([])
   const messagesEndRef = useRef(null)
+  const inputRef = useRef(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }
 
-  // FIXED: Simple and reliable time conversion
-  const convertTo24Hour = (time12h) => {
-    try {
-      // Clean input and handle different formats
-      const cleanTime = time12h.trim().replace(/\s+/g, ' ')
-      
-      // Handle cases like "10:30 AM", "2:30 PM", "14:30"
-      if (!cleanTime.includes('AM') && !cleanTime.includes('PM')) {
-        // Already 24-hour format
-        return cleanTime
-      }
-      
-      const [time, period] = cleanTime.split(' ')
-      let [hours, minutes] = time.split(':')
-      
-      hours = parseInt(hours, 10)
-      minutes = minutes || '00'
-      
-      // Convert to 24-hour
-      if (period.toUpperCase() === 'AM') {
-        if (hours === 12) hours = 0
-      } else if (period.toUpperCase() === 'PM') {
-        if (hours !== 12) hours += 12
-      }
-      
-      const result = `${hours.toString().padStart(2, '0')}:${minutes.padStart(2, '0')}`
-      console.log(`🕐 Time conversion: "${time12h}" -> "${result}"`)
-      return result
-      
-    } catch (e) {
-      console.error('Time conversion error:', e)
-      return '09:00'
+  // FIXED: Maintain input focus
+  useEffect(() => {
+    if (inputRef.current && !isLoading) {
+      inputRef.current.focus()
     }
-  }
+  }, [isLoading, currentStep])
 
   const formatDateSafe = (dateString) => {
     try {
@@ -82,6 +57,42 @@ const ChatBot = () => {
       console.error('Weekend check error:', e)
       return false
     }
+  }
+
+  // FIXED: Phone number validation
+  const validatePhoneNumber = (phone) => {
+    if (!phone) return false
+    
+    // Remove spaces, dashes, and parentheses
+    const cleanPhone = phone.replace(/[\s\-\(\)]+/g, '')
+    
+    // Pakistan phone number patterns
+    const patterns = [
+      /^\+92[0-9]{10}$/,          // +92xxxxxxxxxx
+      /^92[0-9]{10}$/,            // 92xxxxxxxxxx  
+      /^0[0-9]{10}$/,             // 0xxxxxxxxxx
+      /^[0-9]{11}$/,              // xxxxxxxxxxx
+    ]
+    
+    for (const pattern of patterns) {
+      if (pattern.test(cleanPhone)) {
+        return true
+      }
+    }
+    
+    // Also accept basic 10+ digit numbers
+    if (cleanPhone.length >= 10 && /^\d+$/.test(cleanPhone)) {
+      return true
+    }
+        
+    return false
+  }
+
+  // FIXED: Email validation
+  const validateEmail = (email) => {
+    if (!email) return true // Email is optional
+    const pattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/
+    return pattern.test(email)
   }
 
   useEffect(() => {
@@ -116,9 +127,24 @@ const ChatBot = () => {
     }, 1000)
   }
 
+  // FIXED: Handle button clicks
+  const handleButtonClick = (value) => {
+    setShowButtons(false)
+    setButtonOptions([])
+    
+    addMessage(value, 'user')
+    addTypingMessage()
+
+    setTimeout(async () => {
+      await processUserResponse(value)
+    }, 1000)
+  }
+
   const handleUserInput = async (input) => {
     if (!input.trim()) return
 
+    setShowButtons(false)
+    setButtonOptions([])
     addMessage(input, 'user')
     setUserInput('')
     addTypingMessage()
@@ -132,7 +158,21 @@ const ChatBot = () => {
     switch (currentStep) {
       case 'asking_name':
         setUserData(prev => ({ ...prev, name: input }))
-        addMessage(`Nice to meet you, ${input}! 😊\n\nHow can I assist you today? You can:\n\n🦷 Learn about our Services\n🕒 Check our Hours\n📞 Get Contact Info\n🚨 Emergency Information\n📅 Book an Appointment`)
+        // FIXED: Don't show buttons immediately, wait for user to see personalized message
+        addMessage(`Nice to meet you, ${input}! 😊\n\nHow can I assist you today?`)
+        
+        // FIXED: Delay showing buttons to let user read the personalized greeting
+        setTimeout(() => {
+          setShowButtons(true)
+          setButtonOptions([
+            { text: '🦷 Learn about our Services', value: 'services' },
+            { text: '🕒 Check our Hours', value: 'hours' },
+            { text: '📞 Get Contact Info', value: 'contact' },
+            { text: '🚨 Emergency Information', value: 'emergency' },
+            { text: '📅 Book an Appointment', value: 'book' }
+          ])
+        }, 2000) // 2 second delay
+        
         setCurrentStep('main_menu')
         break
 
@@ -157,6 +197,12 @@ const ChatBot = () => {
         break
 
       case 'asking_phone':
+        // FIXED: Validate phone number
+        if (!validatePhoneNumber(input)) {
+          addMessage('Please provide a valid phone number. Examples:\n• +92-321-1234567\n• 0321-1234567\n• 03211234567')
+          return
+        }
+        
         setUserData(prev => ({ ...prev, phone: input }))
         addMessage('Perfect! And what\'s your email address? (Optional - you can type "skip" if you prefer)')
         setCurrentStep('asking_email')
@@ -164,6 +210,11 @@ const ChatBot = () => {
 
       case 'asking_email':
         if (input.toLowerCase() !== 'skip') {
+          // FIXED: Validate email format
+          if (!validateEmail(input)) {
+            addMessage('Please provide a valid email address or type "skip" to continue without email.')
+            return
+          }
           setUserData(prev => ({ ...prev, email: input }))
         }
         await confirmAndBookAppointment()
@@ -178,7 +229,14 @@ const ChatBot = () => {
         break
 
       default:
-        addMessage(`How can I assist you today, ${userData.name}?\n\n🦷 Learn about our Services\n🕒 Check our Hours\n📞 Get Contact Info\n📅 Book an Appointment`)
+        addMessage(`How can I assist you today, ${userData.name}?`)
+        setShowButtons(true)
+        setButtonOptions([
+          { text: '🦷 Learn about our Services', value: 'services' },
+          { text: '🕒 Check our Hours', value: 'hours' },
+          { text: '📞 Get Contact Info', value: 'contact' },
+          { text: '📅 Book an Appointment', value: 'book' }
+        ])
         setCurrentStep('main_menu')
     }
   }
@@ -186,23 +244,74 @@ const ChatBot = () => {
   const handleMainMenuChoice = async (input) => {
     const lowerInput = input.toLowerCase()
 
-    if (lowerInput.includes('service') || lowerInput.includes('dental')) {
-      addMessage('Great! We offer comprehensive dental services:\n\n✨ Cosmetic Dentistry\n   (Teeth whitening, veneers, smile makeovers)\n\n🛡️ General Dentistry\n   (Cleanings, checkups, preventive care)\n\n🔧 Restorative Dentistry\n   (Fillings, crowns, bridges, implants)\n\nWhich service interests you, or would you like to book an appointment?')
+    if (lowerInput.includes('service') || lowerInput === 'services' || lowerInput.includes('dental')) {
+      addMessage('Great! We offer comprehensive dental services:')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '✨ Cosmetic Dentistry', value: 'cosmetic' },
+        { text: '🛡️ General Dentistry', value: 'general' },
+        { text: '🔧 Restorative Dentistry', value: 'restorative' },
+        { text: '📅 Book an Appointment', value: 'book appointment' }
+      ])
       setCurrentStep('service_selection')
-    } else if (lowerInput.includes('hour') || lowerInput.includes('time')) {
-      addMessage('🕒 Our office hours are:\n\n📅 Monday - Friday: 9:00 AM - 7:00 PM\n📅 Saturday: 9:00 AM - 3:00 PM\n📅 Sunday: Closed\n\nWould you like to book an appointment?')
+    } else if (lowerInput.includes('hour') || lowerInput === 'hours' || lowerInput.includes('time')) {
+      addMessage('🕒 Our office hours are:\n\n📅 Monday - Friday: 9:00 AM - 7:00 PM\n📅 Saturday: 9:00 AM - 7:00 PM\n📅 Sunday: Closed\n\nWould you like to book an appointment?')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '📅 Book an Appointment', value: 'book appointment' },
+        { text: '🏠 Back to Main Menu', value: 'main menu' }
+      ])
       setCurrentStep('main_menu')
-    } else if (lowerInput.includes('contact') || lowerInput.includes('phone') || lowerInput.includes('address')) {
+    } else if (lowerInput.includes('contact') || lowerInput === 'contact' || lowerInput.includes('phone') || lowerInput.includes('address')) {
       addMessage('📞 Contact Information:\n\n📱 Phone: (555) 123-4567\n📧 Email: contact@brightsmile.com\n📍 Address: 123 Main St, City, State 12345\n\nWould you like to schedule an appointment?')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '📅 Book an Appointment', value: 'book appointment' },
+        { text: '🏠 Back to Main Menu', value: 'main menu' }
+      ])
       setCurrentStep('main_menu')
-    } else if (lowerInput.includes('emergency')) {
+    } else if (lowerInput.includes('emergency') || lowerInput === 'emergency') {
       addMessage('🚨 For dental emergencies:\n\n📞 Call: (555) 123-4567\n🌙 After hours: (555) 999-HELP\n\nFor immediate care, please call us directly.\n\nWould you like to schedule a regular appointment?')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '📅 Book an Appointment', value: 'book appointment' },
+        { text: '🏠 Back to Main Menu', value: 'main menu' }
+      ])
       setCurrentStep('main_menu')
-    } else if (lowerInput.includes('book') || lowerInput.includes('appointment') || lowerInput.includes('schedule')) {
-      addMessage('Excellent! I\'d be happy to help you book an appointment. 📅\n\nWhat type of service do you need?\n\n✨ Cosmetic Dentistry\n🛡️ General Dentistry  \n🔧 Restorative Dentistry\n\nOr just tell me what you need help with!')
+    } else if (lowerInput.includes('book') || lowerInput === 'book' || lowerInput.includes('appointment') || lowerInput.includes('schedule')) {
+      addMessage('Excellent! I\'d be happy to help you book an appointment. 📅\n\nWhat type of service do you need?')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '✨ Cosmetic Dentistry', value: 'cosmetic' },
+        { text: '🛡️ General Dentistry', value: 'general' },
+        { text: '🔧 Restorative Dentistry', value: 'restorative' }
+      ])
       setCurrentStep('service_selection')
+    } else if (lowerInput.includes('main menu') || lowerInput === 'main menu') {
+      addMessage(`How can I assist you today, ${userData.name}?`)
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '🦷 Learn about our Services', value: 'services' },
+        { text: '🕒 Check our Hours', value: 'hours' },
+        { text: '📞 Get Contact Info', value: 'contact' },
+        { text: '📅 Book an Appointment', value: 'book' }
+      ])
     } else {
-      addMessage('I understand you\'re interested in our dental services. Let me help you with:\n\n🦷 Learn about our Services\n🕒 Check our Hours\n📞 Get Contact Info\n📅 Book an Appointment\n\nWhat would you like to know?')
+      addMessage('I understand you\'re interested in our dental services. Let me help you with:')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '🦷 Learn about our Services', value: 'services' },
+        { text: '🕒 Check our Hours', value: 'hours' },
+        { text: '📞 Get Contact Info', value: 'contact' },
+        { text: '📅 Book an Appointment', value: 'book' }
+      ])
     }
   }
 
@@ -210,37 +319,98 @@ const ChatBot = () => {
     const lowerInput = input.toLowerCase()
     let selectedService = ''
 
-    if (lowerInput.includes('cosmetic') || lowerInput.includes('whitening') || lowerInput.includes('veneer')) {
+    if (lowerInput.includes('cosmetic') || lowerInput === 'cosmetic' || lowerInput.includes('whitening') || lowerInput.includes('veneer')) {
       selectedService = 'Cosmetic Dentistry'
-    } else if (lowerInput.includes('general') || lowerInput.includes('cleaning') || lowerInput.includes('checkup')) {
+    } else if (lowerInput.includes('general') || lowerInput === 'general' || lowerInput.includes('cleaning') || lowerInput.includes('checkup')) {
       selectedService = 'General Dentistry'
-    } else if (lowerInput.includes('restorative') || lowerInput.includes('filling') || lowerInput.includes('crown') || lowerInput.includes('implant')) {
+    } else if (lowerInput.includes('restorative') || lowerInput === 'restorative' || lowerInput.includes('filling') || lowerInput.includes('crown') || lowerInput.includes('implant')) {
       selectedService = 'Restorative Dentistry'
     } else if (lowerInput.includes('book') || lowerInput.includes('appointment')) {
       selectedService = 'General Dentistry'
     } else {
-      addMessage('I\'d be happy to help! Could you please specify which service you\'re interested in?\n\n✨ Cosmetic Dentistry\n🛡️ General Dentistry\n🔧 Restorative Dentistry\n\nOr just type "book appointment" to proceed with general services.')
+      addMessage('I\'d be happy to help! Could you please specify which service you\'re interested in?')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '✨ Cosmetic Dentistry', value: 'cosmetic' },
+        { text: '🛡️ General Dentistry', value: 'general' },
+        { text: '🔧 Restorative Dentistry', value: 'restorative' }
+      ])
       return
     }
 
     setUserData(prev => ({ ...prev, service: selectedService }))
-    addMessage(`Perfect! ${selectedService} is one of our specialties. 🌟\n\nWould you like to book an appointment for today or on a later day?`)
+    addMessage(`Perfect! ${selectedService} is one of our specialties. 🌟\n\nWhen would you like to schedule your appointment?`)
+    
+    setShowButtons(true)
+    setButtonOptions([
+      { text: '📅 Today', value: 'today' },
+      { text: '📅 Tomorrow', value: 'tomorrow' },
+      { text: '📅 This Week', value: 'this week' },
+      { text: '📅 Choose Specific Date', value: 'specific date' }
+    ])
     setCurrentStep('asking_date_preference')
   }
 
   const handleDatePreference = async (input) => {
     const lowerInput = input.toLowerCase()
 
-    if (lowerInput.includes('today')) {
+    if (lowerInput.includes('today') || lowerInput === 'today') {
       await checkTodayAvailability()
-    } else if (lowerInput.includes('later') || lowerInput.includes('tomorrow') || lowerInput.includes('another') || lowerInput.includes('different')) {
+    } else if (lowerInput.includes('tomorrow') || lowerInput === 'tomorrow') {
+      await checkSpecificDateAvailability('tomorrow')
+    } else if (lowerInput.includes('this week') || lowerInput === 'this week') {
       await showNextFewDaysAvailability()
+    } else if (lowerInput.includes('specific') || lowerInput === 'specific date') {
+      addMessage('Please tell me your preferred date. You can say:\n• "Monday" or "Friday"\n• "July 28" or "28th July"\n• "Next week"\n• "2025-07-28"')
+      setCurrentStep('asking_specific_date')
     } else {
       await handleSpecificDateInput(input)
     }
   }
 
-  // FIXED: Enhanced today availability check with proper time filtering
+  const checkSpecificDateAvailability = async (dateInput) => {
+    setIsLoading(true)
+    addMessage(`Let me check availability for ${dateInput}... 🔍`)
+    
+    try {
+      const response = await axios.get(`/api/available-slots?date=${dateInput}`)
+      
+      if (response.data.success && response.data.available_slots.length > 0) {
+        console.log(`📅 Found ${response.data.available_slots.length} slots for ${dateInput}`)
+        
+        setAvailableSlots(response.data.available_slots)
+        const parsedDate = response.data.date || dateInput
+        setUserData(prev => ({ ...prev, date: parsedDate, originalDateInput: dateInput }))
+        
+        const slotsText = response.data.available_slots
+          .slice(0, 6)
+          .map((slot, index) => `${index + 1}. ${slot.formatted_time}`)
+          .join('\n')
+        
+        addMessage(`Great! I found available time slots for ${parsedDate}:\n\n${slotsText}`)
+        
+        setShowButtons(true)
+        setButtonOptions(
+          response.data.available_slots.slice(0, 6).map((slot, index) => ({
+            text: `${index + 1}. ${slot.formatted_time}`,
+            value: slot.formatted_time
+          }))
+        )
+        setCurrentStep('slot_selection')
+      } else {
+        addMessage(`Sorry, no appointments are available for ${dateInput}. 😔\n\nWould you like to see availability for other days?`)
+        await showNextFewDaysAvailability()
+      }
+    } catch (error) {
+      console.error('Availability check error:', error)
+      addMessage(`I couldn't check availability for ${dateInput}. Let me show you the next few days instead.`)
+      await showNextFewDaysAvailability()
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
   const checkTodayAvailability = async () => {
     setIsLoading(true)
     addMessage('Let me check today\'s availability... 🔍')
@@ -256,26 +426,26 @@ const ChatBot = () => {
       if (response.data.success && response.data.available_slots.length > 0) {
         console.log(`📅 Found ${response.data.available_slots.length} slots for today`)
         
-        // FIXED: Use backend-filtered slots (they're already filtered for future times)
-        const futureSlots = response.data.available_slots
+        setAvailableSlots(response.data.available_slots)
+        setUserData(prev => ({ ...prev, date: dateStr }))
         
-        if (futureSlots.length > 0) {
-          setAvailableSlots(futureSlots)
-          setUserData(prev => ({ ...prev, date: dateStr }))
-          
-          const slotsText = futureSlots
-            .slice(0, 6)
-            .map((slot, index) => `${index + 1}. ${slot.formatted_time}`)
-            .join('\n')
-          
-          addMessage(`Great! I found available time slots for today:\n\n${slotsText}\n\nPlease tell me the number (1-${Math.min(6, futureSlots.length)}) or specific time you prefer.`)
-          setCurrentStep('slot_selection')
-        } else {
-          addMessage('Sorry, no appointments are available for the rest of today. 😔\n\nWould you like to see availability for tomorrow or the next few days?')
-          await showNextFewDaysAvailability()
-        }
+        const slotsText = response.data.available_slots
+          .slice(0, 6)
+          .map((slot, index) => `${index + 1}. ${slot.formatted_time}`)
+          .join('\n')
+        
+        addMessage(`Great! I found available time slots for today:\n\n${slotsText}`)
+        
+        setShowButtons(true)
+        setButtonOptions(
+          response.data.available_slots.slice(0, 6).map((slot, index) => ({
+            text: `${index + 1}. ${slot.formatted_time}`,
+            value: slot.formatted_time
+          }))
+        )
+        setCurrentStep('slot_selection')
       } else {
-        addMessage('Sorry, no appointments are available today. 😔\n\nWould you like to see availability for the next few days?')
+        addMessage('Sorry, no appointments are available for the rest of today. 😔\n\nWould you like to see availability for tomorrow or the next few days?')
         await showNextFewDaysAvailability()
       }
     } catch (error) {
@@ -288,93 +458,106 @@ const ChatBot = () => {
   }
 
   const showNextFewDaysAvailability = async () => {
+    setIsLoading(true)
     addMessage('Let me show you availability for the next few days... 📅')
     
-    const nextDays = []
-    const today = new Date()
-    
-    for (let i = 1; i <= 4; i++) {
-      const futureDate = new Date(today)
-      futureDate.setDate(today.getDate() + i)
+    try {
+      const response = await axios.get('/api/next-days-availability?days=3')
       
-      const dayOfWeek = futureDate.getDay()
-      if (dayOfWeek !== 0) { // Skip Sundays
-        const dateStr = futureDate.toISOString().split('T')[0]
-        const dayName = futureDate.toLocaleDateString('en-US', { weekday: 'long' })
-        const dateDisplay = futureDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      if (response.data.success && Object.keys(response.data.availability).length > 0) {
+        const availability = response.data.availability
+        const daysArray = Object.entries(availability)
         
-        nextDays.push({
-          dateStr,
-          display: `${dayName}, ${dateDisplay}`,
-          dayName
-        })
+        const daysText = daysArray
+          .map(([dateStr, dayInfo], index) => `${index + 1}. ${dayInfo.day}, ${dayInfo.date}`)
+          .join('\n')
+        
+        addMessage(`Here are the next few available days:\n\n${daysText}`)
+        
+        setShowButtons(true)
+        setButtonOptions(
+          daysArray.map(([dateStr, dayInfo], index) => ({
+            text: `${index + 1}. ${dayInfo.day}, ${dayInfo.date}`,
+            value: dateStr
+          }))
+        )
+        
+        setUserData(prev => ({ ...prev, availableDays: daysArray }))
+        setCurrentStep('asking_specific_date')
+      } else {
+        addMessage('I couldn\'t find available appointments in the next few days. Please call us directly at (555) 123-4567 to schedule.')
+        setCurrentStep('main_menu')
       }
+    } catch (error) {
+      console.error('Next days availability error:', error)
+      addMessage('I couldn\'t retrieve availability information. Please try again or call us at (555) 123-4567.')
+      setCurrentStep('main_menu')
+    } finally {
+      setIsLoading(false)
     }
-    
-    const daysText = nextDays
-      .map((day, index) => `${index + 1}. ${day.display}`)
-      .join('\n')
-    
-    addMessage(`Here are the next few available days:\n\n${daysText}\n\nPlease choose a number (1-${nextDays.length}) or tell me a specific date you prefer.`)
-    
-    setUserData(prev => ({ ...prev, availableDays: nextDays }))
-    setCurrentStep('asking_specific_date')
   }
 
   const handleSpecificDateInput = async (input) => {
     const { availableDays } = userData
     
+    if (availableDays) {
+      const selectedDay = availableDays.find(([dateStr]) => dateStr === input)
+      if (selectedDay) {
+        const [dateStr, dayInfo] = selectedDay
+        setUserData(prev => ({ ...prev, date: dateStr }))
+        await checkAvailability(dateStr)
+        return
+      }
+    }
+
     const dayNumber = parseInt(input)
     if (dayNumber && availableDays && dayNumber >= 1 && dayNumber <= availableDays.length) {
-      const selectedDay = availableDays[dayNumber - 1]
-      setUserData(prev => ({ ...prev, date: selectedDay.dateStr }))
-      await checkAvailability(selectedDay.dateStr)
+      const [dateStr] = availableDays[dayNumber - 1]
+      setUserData(prev => ({ ...prev, date: dateStr }))
+      await checkAvailability(dateStr)
       return
     }
 
+    setIsLoading(true)
+    addMessage(`Let me check availability for "${input}"... 🔍`)
+    
     try {
-      let appointmentDate
-      const today = new Date()
+      const response = await axios.get(`/api/available-slots?date=${encodeURIComponent(input)}`)
       
-      if (input.includes('/') || input.includes('-')) {
-        appointmentDate = new Date(input)
+      if (response.data.success && response.data.available_slots.length > 0) {
+        setAvailableSlots(response.data.available_slots)
+        const parsedDate = response.data.date || input
+        setUserData(prev => ({ ...prev, date: parsedDate, originalDateInput: input }))
+        
+        const slotsText = response.data.available_slots
+          .slice(0, 6)
+          .map((slot, index) => `${index + 1}. ${slot.formatted_time}`)
+          .join('\n')
+        
+        addMessage(`Great! I found available time slots for ${parsedDate}:\n\n${slotsText}`)
+        
+        setShowButtons(true)
+        setButtonOptions(
+          response.data.available_slots.slice(0, 6).map((slot, index) => ({
+            text: `${index + 1}. ${slot.formatted_time}`,
+            value: slot.formatted_time
+          }))
+        )
+        setCurrentStep('slot_selection')
       } else {
-        if (input.toLowerCase().includes('tomorrow')) {
-          appointmentDate = new Date(today)
-          appointmentDate.setDate(today.getDate() + 1)
-        } else if (input.toLowerCase().includes('today')) {
-          await checkTodayAvailability()
-          return
-        } else {
-          appointmentDate = new Date(input + ', ' + today.getFullYear())
-        }
+        addMessage(`Sorry, no appointments are available for "${input}". 😔\n\n${response.data.message || 'Please try a different date.'}`)
+        await showNextFewDaysAvailability()
       }
-
-      if (isNaN(appointmentDate.getTime())) {
-        throw new Error('Invalid date format')
-      }
-
-      if (appointmentDate < today) {
-        addMessage('Please choose a future date. What date would work for you?')
-        return
-      }
-
-      const year = appointmentDate.getFullYear()
-      const month = String(appointmentDate.getMonth() + 1).padStart(2, '0')
-      const day = String(appointmentDate.getDate()).padStart(2, '0')
-      const dateStr = `${year}-${month}-${day}`
-      
-      if (isWeekend(dateStr)) {
-        addMessage('We\'re closed on Sundays. Please choose Monday through Saturday for your appointment.')
-        return
-      }
-      
-      setUserData(prev => ({ ...prev, date: dateStr }))
-      await checkAvailability(dateStr)
-      
     } catch (error) {
-      console.error('Date parsing error:', error)
-      addMessage('I couldn\'t understand that date format. Please try again with formats like:\n• "July 28"\n• "2025-07-28"\n• "Tomorrow"\n\nOr choose from the numbered options above.')
+      console.error('Date parsing/availability error:', error)
+      
+      if (error.response?.status === 400) {
+        addMessage(`I couldn't understand "${input}". Please try formats like:\n• "Monday" or "Friday"\n• "Tomorrow"\n• "July 28"\n• "2025-07-28"`)
+      } else {
+        addMessage('I couldn\'t check availability right now. Please try again or call us at (555) 123-4567.')
+      }
+    } finally {
+      setIsLoading(false)
     }
   }
 
@@ -395,7 +578,15 @@ const ChatBot = () => {
           .map((slot, index) => `${index + 1}. ${slot.formatted_time}`)
           .join('\n')
         
-        addMessage(`Great! I found available time slots for ${formattedDate}:\n\n${slotsText}\n\nPlease tell me the number (1-${Math.min(6, response.data.available_slots.length)}) or specific time you prefer.`)
+        addMessage(`Great! I found available time slots for ${formattedDate}:\n\n${slotsText}`)
+        
+        setShowButtons(true)
+        setButtonOptions(
+          response.data.available_slots.slice(0, 6).map((slot, index) => ({
+            text: `${index + 1}. ${slot.formatted_time}`,
+            value: slot.formatted_time
+          }))
+        )
         setCurrentStep('slot_selection')
       } else {
         addMessage('Sorry, no appointments are available on that date. 😔\n\nWould you like to try another date?')
@@ -416,68 +607,56 @@ const ChatBot = () => {
     }
   }
 
-  // FIXED: Completely rewritten slot selection to prevent time conversion bugs
   const handleSlotSelection = async (input) => {
-    const slotNumber = parseInt(input)
     let selectedSlot
 
-    console.log(`🎯 Slot selection input: "${input}", parsed number: ${slotNumber}`)
-    console.log(`📋 Available slots:`, availableSlots.map(s => ({ formatted: s.formatted_time, time24: s.time_24h })))
+    // Handle direct button clicks (formatted time)
+    selectedSlot = availableSlots.find(slot => slot.formatted_time === input)
+    
+    if (!selectedSlot) {
+      // Handle numbered selections
+      const slotNumber = parseInt(input)
+      if (slotNumber && slotNumber >= 1 && slotNumber <= availableSlots.length) {
+        selectedSlot = availableSlots[slotNumber - 1]
+      }
+    }
 
-    if (slotNumber && slotNumber >= 1 && slotNumber <= availableSlots.length) {
-      // User selected by number
-      selectedSlot = availableSlots[slotNumber - 1]
-      console.log(`✅ Selected slot by number: ${JSON.stringify(selectedSlot)}`)
-    } else {
-      // User typed a time - find exact match
+    if (!selectedSlot) {
+      // Try text matching
       const lowerInput = input.toLowerCase().trim()
-      
       selectedSlot = availableSlots.find(slot => {
         const slotTime = slot.formatted_time.toLowerCase()
-        
-        // Direct match with formatted time
-        if (slotTime === lowerInput) return true
-        
-        // Partial match
-        if (slotTime.includes(lowerInput)) return true
-        
-        // Try to match with 24-hour format if available
-        if (slot.time_24h && slot.time_24h === input) return true
-        
-        return false
+        return slotTime === lowerInput || slotTime.includes(lowerInput)
       })
-      
-      console.log(`🔍 Selected slot by text: ${selectedSlot ? JSON.stringify(selectedSlot) : 'Not found'}`)
     }
 
     if (selectedSlot) {
-      // FIXED: Use the exact formatted time and convert reliably
       const timeDisplay = selectedSlot.formatted_time
-      let timeStr
+      // FIXED: Use the exact time string from backend without conversion
+      const timeStr = selectedSlot.time_24h || selectedSlot.formatted_time
       
-      // Use the 24-hour format if available, otherwise convert
-      if (selectedSlot.time_24h) {
-        timeStr = selectedSlot.time_24h
-      } else {
-        timeStr = convertTo24Hour(selectedSlot.formatted_time)
-      }
-      
-      console.log(`🕐 Final time assignment: display="${timeDisplay}", backend="${timeStr}"`)
+      console.log(`🕐 Selected slot: display="${timeDisplay}", backend="${timeStr}"`)
       
       setUserData(prev => ({ 
         ...prev, 
         time: timeStr,
-        timeDisplay: timeDisplay
+        timeDisplay: timeDisplay,
+        // FIXED: Store the original slot data to preserve exact timing
+        selectedSlot: selectedSlot
       }))
       
       addMessage(`Perfect! I've reserved ${timeDisplay} for you. ⏰\n\nNow I need your phone number for confirmation.`)
       setCurrentStep('asking_phone')
     } else {
-      const availableOptions = availableSlots.slice(0, 6).map((slot, index) => 
-        `${index + 1}. ${slot.formatted_time}`
-      ).join('\n')
+      addMessage(`I couldn't find that time slot. Please choose from the available options above or try again.`)
       
-      addMessage(`I couldn't find that time slot. Please choose from:\n\n${availableOptions}\n\nSelect a number (1-6) or type the exact time.`)
+      setShowButtons(true)
+      setButtonOptions(
+        availableSlots.slice(0, 6).map((slot, index) => ({
+          text: `${index + 1}. ${slot.formatted_time}`,
+          value: slot.formatted_time
+        }))
+      )
     }
   }
 
@@ -520,41 +699,85 @@ const ChatBot = () => {
     const formattedDate = formatDateSafe(date)
     const displayTime = timeDisplay || time || 'Time not selected'
     
-    addMessage(`Perfect! Let me confirm your appointment details:\n\n👤 Name: ${name}\n🦷 Service: ${service}\n📅 Date: ${formattedDate}\n⏰ Time: ${displayTime}\n📞 Phone: ${phone}${email ? `\n📧 Email: ${email}` : ''}\n\nShall I book this appointment for you? (Yes/No)`)
+    addMessage(`Perfect! Let me confirm your appointment details:\n\n👤 Name: ${name}\n🦷 Service: ${service}\n📅 Date: ${formattedDate}\n⏰ Time: ${displayTime}\n📞 Phone: ${phone}${email ? `\n📧 Email: ${email}` : ''}`)
+    
+    setShowButtons(true)
+    setButtonOptions([
+      { text: '✅ Yes, Book This Appointment', value: 'yes' },
+      { text: '❌ No, Let Me Change Something', value: 'no' }
+    ])
     setCurrentStep('final_confirmation')
   }
 
   const handleFinalConfirmation = async (input) => {
     const response = input.toLowerCase()
-    if (response.includes('yes') || response.includes('confirm') || response.includes('book')) {
+    if (response.includes('yes') || response === 'yes' || response.includes('confirm') || response.includes('book')) {
       await bookAppointment()
-    } else if (response.includes('no') || response.includes('cancel')) {
-      addMessage('No problem! Would you like to:\n\n📅 Choose a different date/time\n🏠 Start over\n📞 Contact us directly')
+    } else if (response.includes('no') || response === 'no' || response.includes('cancel')) {
+      addMessage('No problem! What would you like to change?')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '📅 Choose Different Date/Time', value: 'change date' },
+        { text: '🦷 Change Service', value: 'change service' },
+        { text: '🏠 Start Over', value: 'start over' }
+      ])
       setCurrentStep('main_menu')
     } else {
-      addMessage('Please reply with "Yes" to confirm the booking or "No" to cancel.')
+      addMessage('Please confirm your booking:')
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '✅ Yes, Book This Appointment', value: 'yes' },
+        { text: '❌ No, Let Me Change Something', value: 'no' }
+      ])
     }
   }
 
   const bookAppointment = async () => {
     setIsLoading(true)
+    setShowButtons(false)
     addMessage('Booking your appointment... 📅')
     
     try {
-      // FIXED: Use the exact time format without additional conversion
+      // FIXED: Preserve exact slot timing to prevent timezone issues
+      let appointmentDate = userData.date
       let appointmentTime = userData.time
       
-      // Validate time format
-      if (!/^\d{2}:\d{2}$/.test(appointmentTime)) {
-        console.warn(`Invalid time format: ${appointmentTime}, converting...`)
-        appointmentTime = convertTo24Hour(userData.timeDisplay || appointmentTime)
+      // CRITICAL FIX: If we have the original slot data, use its exact start_time
+      if (userData.selectedSlot && userData.selectedSlot.start_time) {
+        // Parse the ISO datetime from the slot
+        const slotDateTime = new Date(userData.selectedSlot.start_time)
+        appointmentDate = slotDateTime.toISOString().split('T')[0] // YYYY-MM-DD
+        appointmentTime = slotDateTime.toTimeString().substr(0, 5) // HH:MM
+        
+        console.log(`🎯 CRITICAL FIX - Using exact slot timing:`)
+        console.log(`  Original slot start_time: ${userData.selectedSlot.start_time}`)
+        console.log(`  Extracted date: ${appointmentDate}`)
+        console.log(`  Extracted time: ${appointmentTime}`)
+      } else {
+        // Fallback to manual parsing
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(appointmentDate)) {
+          const today = new Date()
+          const testDate = new Date(appointmentDate)
+          if (!isNaN(testDate.getTime())) {
+            appointmentDate = testDate.toISOString().split('T')[0]
+          } else {
+            throw new Error('Invalid date format')
+          }
+        }
+        
+        if (!/^\d{2}:\d{2}$/.test(appointmentTime)) {
+          console.warn(`Invalid time format: ${appointmentTime}, using fallback`)
+          appointmentTime = '09:00'
+        }
       }
       
       console.log('🚀 Final booking data:', {
         patient_name: userData.name,
         patient_phone: userData.phone,
         patient_email: userData.email || '',
-        appointment_date: userData.date,
+        appointment_date: appointmentDate,
         appointment_time: appointmentTime,
         appointment_type: userData.service
       })
@@ -563,22 +786,29 @@ const ChatBot = () => {
         patient_name: userData.name,
         patient_phone: userData.phone,
         patient_email: userData.email || '',
-        appointment_date: userData.date,
+        appointment_date: appointmentDate,
         appointment_time: appointmentTime,
         appointment_type: userData.service,
         notes: `Booked via AI Chatbot`
       })
 
       if (response.data.success) {
-        const formattedDate = formatDateSafe(userData.date)
+        const formattedDate = formatDateSafe(appointmentDate)
         const displayTime = userData.timeDisplay || appointmentTime
         
         addMessage(`🎉 Excellent! Your appointment has been successfully booked!\n\n✅ Confirmation Details:\n📅 ${formattedDate} at ${displayTime}\n🦷 ${userData.service}\n\nYou'll receive a confirmation call/email shortly. Is there anything else I can help you with?`)
         
+        setShowButtons(true)
+        setButtonOptions([
+          { text: '📅 Book Another Appointment', value: 'book' },
+          { text: '🏠 Back to Main Menu', value: 'main menu' },
+          { text: '📞 Contact Us', value: 'contact' }
+        ])
+        
         setCurrentStep('main_menu')
         setUserData({ name: userData.name })
       } else {
-        addMessage(`Sorry, there was an issue booking your appointment: ${response.data.message}\n\nWould you like to try a different time slot?`)
+        addMessage(`Sorry, there was an issue booking your appointment: ${response.data.message}`)
         
         if (response.data.alternatives && response.data.alternatives.length > 0) {
           const altSlotsText = response.data.alternatives
@@ -586,7 +816,16 @@ const ChatBot = () => {
             .map((slot, index) => `${index + 1}. ${slot.formatted_time}`)
             .join('\n')
           
-          addMessage(`Here are alternative time slots available:\n\n${altSlotsText}\n\nWould you like to select one of these?`)
+          addMessage(`Here are alternative time slots available:\n\n${altSlotsText}`)
+          
+          setShowButtons(true)
+          setButtonOptions(
+            response.data.alternatives.slice(0, 5).map((slot, index) => ({
+              text: `${index + 1}. ${slot.formatted_time}`,
+              value: slot.formatted_time
+            }))
+          )
+          
           setAvailableSlots(response.data.alternatives)
           setCurrentStep('slot_selection')
         } else {
@@ -598,7 +837,7 @@ const ChatBot = () => {
       let errorMessage = 'Sorry, I encountered an error while booking.'
       
       if (error.response) {
-        errorMessage += ` Server responded with: ${error.response.data.message || 'Unknown error'}`
+        errorMessage += ` ${error.response.data.message || 'Unknown error'}`
       } else if (error.request) {
         errorMessage += ' Could not connect to booking system. Please check if the backend is running.'
       } else {
@@ -606,16 +845,31 @@ const ChatBot = () => {
       }
       
       addMessage(`${errorMessage}\n\nPlease try again or call us directly at (555) 123-4567.`)
+      
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '🔄 Try Again', value: 'book' },
+        { text: '📞 Call Us Instead', value: 'contact' },
+        { text: '🏠 Main Menu', value: 'main menu' }
+      ])
       setCurrentStep('main_menu')
     } finally {
       setIsLoading(false)
     }
   }
 
+  // Enhanced quick actions
   const quickActions = [
     { text: '🏠 Start Over', action: () => {
       setCurrentStep('main_menu')
-      addMessage(`How can I assist you today, ${userData.name || 'there'}?\n\n🦷 Learn about our Services\n🕒 Check our Hours\n📞 Get Contact Info\n📅 Book an Appointment`)
+      setShowButtons(true)
+      setButtonOptions([
+        { text: '🦷 Learn about our Services', value: 'services' },
+        { text: '🕒 Check our Hours', value: 'hours' },
+        { text: '📞 Get Contact Info', value: 'contact' },
+        { text: '📅 Book an Appointment', value: 'book' }
+      ])
+      addMessage(`How can I assist you today, ${userData.name || 'there'}?`)
     }},
     { text: '🚨 Emergency', action: () => {
       addMessage('🚨 For dental emergencies:\n\n📞 Call: (555) 123-4567\n🌙 After hours: (555) 999-HELP\n\nFor immediate care, please call us directly.')
@@ -668,6 +922,22 @@ const ChatBot = () => {
           </div>
         ))}
 
+        {/* Clickable Button Options */}
+        {showButtons && buttonOptions.length > 0 && (
+          <div className="flex flex-col space-y-2 max-w-md">
+            {buttonOptions.map((option, index) => (
+              <button
+                key={index}
+                onClick={() => handleButtonClick(option.value)}
+                className="bg-white border border-dental-blue text-dental-blue px-4 py-2 rounded-lg hover:bg-dental-blue hover:text-white transition-colors duration-200 text-left"
+                disabled={isLoading}
+              >
+                {option.text}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Loading indicator */}
         {isLoading && (
           <div className="flex items-start space-x-3">
@@ -687,17 +957,19 @@ const ChatBot = () => {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
+      {/* Input Area with maintained focus */}
       <div className="bg-white border-t border-gray-200 p-4 flex-shrink-0">
         <div className="flex space-x-2 mb-3">
           <input
+            ref={inputRef}
             type="text"
             value={userInput}
             onChange={(e) => setUserInput(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleUserInput(userInput)}
-            placeholder="Type your message..."
+            placeholder={showButtons ? "Choose an option above or type your message..." : "Type your message..."}
             className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-dental-blue focus:border-dental-blue"
             disabled={isLoading}
+            autoFocus
           />
           <button
             onClick={() => handleUserInput(userInput)}
@@ -715,6 +987,7 @@ const ChatBot = () => {
               key={index}
               onClick={action.action}
               className="text-dental-blue hover:text-dental-dark"
+              disabled={isLoading}
             >
               {action.text}
             </button>
@@ -725,4 +998,4 @@ const ChatBot = () => {
   )
 }
 
-export default ChatBot;
+export default ChatBot

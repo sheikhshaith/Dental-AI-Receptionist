@@ -1,3 +1,4 @@
+// app.jsx
 import ChatBot from './Components/ChatBot'
 import { Smile } from 'lucide-react'
 
