@@ -1,4 +1,5 @@
 
+
 # backend/run.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -16,6 +17,9 @@ from calendar_service import (
     get_next_few_days_availability, parse_natural_date, validate_phone_number, validate_email
 )
 
+# 🆕 IMPORT EMAIL SERVICE
+from email_service import test_email_configuration
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +35,7 @@ LAHORE_TZ = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Karachi'))
 
 @app.route('/api/book-appointment', methods=['POST'])
 def api_book_appointment():
-    """Handle appointment booking from chatbot with enhanced validation and timezone fixes"""
+    """Handle appointment booking from chatbot with enhanced validation, timezone fixes, and email confirmation"""
     try:
         data = request.json
         logger.info(f"📅 Booking request received: {data}")
@@ -56,8 +60,9 @@ def api_book_appointment():
                 'error_type': 'phone_validation_error'
             }), 400
         
-        # Validate email if provided
-        if data.get('patient_email') and not validate_email(data['patient_email']):
+        # 🆕 VALIDATE EMAIL IF PROVIDED
+        patient_email = data.get('patient_email', '').strip()
+        if patient_email and not validate_email(patient_email):
             return jsonify({
                 'success': False,
                 'message': 'Please provide a valid email address',
@@ -148,21 +153,24 @@ def api_book_appointment():
                 'error_type': 'weekend_error'
             }), 400
         
-        # CRITICAL FIX: Call calendar service with proper logging
+        # CRITICAL FIX: Call calendar service with proper logging and EMAIL
         logger.info("🔄 Calling calendar service with exact parameters...")
         logger.info(f"  patient_name: {data['patient_name']}")
         logger.info(f"  patient_phone: {data['patient_phone']}")
+        logger.info(f"  patient_email: {patient_email or 'Not provided'}")
         logger.info(f"  appointment_date: {appointment_date} (type: {type(appointment_date)})")
         logger.info(f"  appointment_time: {appointment_time} (type: {type(appointment_time)})")
         logger.info(f"  appointment_type: {data['appointment_type']}")
         
+        # 🆕 PASS EMAIL TO CALENDAR SERVICE
         result = book_appointment(
             patient_name=data['patient_name'],
             patient_phone=data['patient_phone'],
             appointment_date=appointment_date,
             appointment_time=appointment_time,
             duration_minutes=int(data.get('duration_minutes', 60)),  # Default 1 hour
-            appointment_type=data['appointment_type']
+            appointment_type=data['appointment_type'],
+            patient_email=patient_email or None  # Pass email to calendar service
         )
         
         logger.info(f"✅ Booking result: {result}")
@@ -174,8 +182,19 @@ def api_book_appointment():
                 'parsed_time': appointment_time.strftime('%H:%M'),
                 'timezone': 'Asia/Karachi',
                 'appointment_datetime_pkt': appointment_datetime_local.strftime('%Y-%m-%d %H:%M:%S %Z'),
-                'appointment_datetime_utc': appointment_datetime_local.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S %Z')
+                'appointment_datetime_utc': appointment_datetime_local.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S %Z'),
+                'email_provided': bool(patient_email)
             }
+            
+            # 🆕 ADD EMAIL STATUS TO RESPONSE
+            email_status = result.get('email_confirmation', {})
+            if email_status.get('sent'):
+                result['message'] += f" A confirmation email has been sent to {patient_email}."
+            elif patient_email:
+                result['message'] += f" Note: Confirmation email could not be sent to {patient_email}."
+            else:
+                result['message'] += " No email provided for confirmation."
+                
         else:
             logger.warning(f"🚨 Booking failed: {result.get('message')}")
             
@@ -363,16 +382,64 @@ def api_parse_date():
             'error_type': 'parsing_error'
         }), 500
 
+# 🆕 NEW ENDPOINT: Test Email Configuration
+@app.route('/api/test-email', methods=['GET'])
+def api_test_email():
+    """Test email configuration and send a test email"""
+    try:
+        # Test email configuration
+        email_test_result = test_email_configuration()
+        
+        return jsonify({
+            'success': email_test_result['success'],
+            'message': email_test_result['message'],
+            'details': email_test_result.get('details', {}),
+            'error': email_test_result.get('error') if not email_test_result['success'] else None
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Error testing email configuration: {e}")
+        return jsonify({
+            'success': False,
+            'message': 'Failed to test email configuration',
+            'error': str(e)
+        }), 500
+
+# 🆕 NEW ENDPOINT: Email Configuration Check
+@app.route('/api/email-config', methods=['GET'])
+def api_email_config():
+    """Check email configuration without sending test email"""
+    config = {
+        'smtp_server': os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
+        'smtp_port': int(os.getenv('SMTP_PORT', 587)),
+        'email_user_configured': bool(os.getenv('EMAIL_USER')),
+        'email_password_configured': bool(os.getenv('EMAIL_PASSWORD')),
+        'test_recipient': os.getenv('TEST_EMAIL_RECIPIENT', 'Same as sender')
+    }
+    
+    is_configured = config['email_user_configured'] and config['email_password_configured']
+    
+    return jsonify({
+        'success': is_configured,
+        'message': 'Email configuration check complete',
+        'configuration': config,
+        'status': 'Ready' if is_configured else 'Incomplete configuration'
+    })
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint with timezone debugging"""
     now_local = datetime.now(LAHORE_TZ)
     now_utc = datetime.now(pytz.UTC)
     
+    # Check email configuration status
+    email_configured = bool(os.getenv('EMAIL_USER')) and bool(os.getenv('EMAIL_PASSWORD'))
+    
     return jsonify({
         'status': 'healthy',
         'message': 'Dental Office AI Receptionist API is running',
         'calendar_integration': 'Active',
+        'email_integration': 'Configured' if email_configured else 'Not Configured',
         'timezone_info': {
             'server_timezone': 'Asia/Karachi',
             'current_time_pkt': now_local.strftime('%Y-%m-%d %H:%M:%S %Z'),
@@ -384,6 +451,7 @@ def health_check():
             'natural_language_dates': True,
             'phone_validation': True,
             'email_validation': True,
+            'email_confirmation': email_configured,
             'time_conflict_checking': True,
             'availability_filtering': True,
             'timezone_preservation': True
@@ -492,7 +560,7 @@ def index():
     
     return jsonify({
         'service': 'Dental Office AI Receptionist',
-        'version': '2.1',
+        'version': '2.2',
         'timezone': 'Asia/Karachi (PKT)',
         'current_time': now_local.strftime('%Y-%m-%d %H:%M:%S %Z'),
         'business_hours': {
@@ -506,6 +574,8 @@ def index():
             'GET /api/today-availability',
             'GET /api/next-days-availability?days=3',
             'POST /api/parse-date',
+            'GET /api/test-email',
+            'GET /api/email-config',
             'GET /api/health',
             'GET /api/test-weekend?date=YYYY-MM-DD',
             'GET /api/test-timezone?date=YYYY-MM-DD&time=HH:MM'
@@ -513,6 +583,7 @@ def index():
         'features': {
             'natural_language_dates': 'Supports "monday", "tomorrow", "next week"',
             'validation': 'Phone numbers and email addresses',
+            'email_confirmation': 'Sends confirmation emails to patients',
             'smart_availability': 'Only shows days with actual slots',
             'conflict_detection': 'Prevents double bookings',
             'timezone_preservation': 'Maintains exact appointment times',
@@ -523,6 +594,7 @@ def index():
             'Fixed timezone handling to prevent time mismatches',
             'Preserved exact slot timing from frontend to calendar',
             'Enhanced validation and error handling',
+            'Added email confirmation functionality',
             'Added comprehensive debugging endpoints'
         ]
     })
@@ -538,6 +610,8 @@ def not_found(error):
             'GET /api/today-availability',
             'GET /api/next-days-availability',
             'POST /api/parse-date',
+            'GET /api/test-email',
+            'GET /api/email-config',
             'GET /api/health',
             'GET /api/test-timezone'
         ]
@@ -552,8 +626,9 @@ def internal_error(error):
     }), 500
 
 if __name__ == "__main__":
-    print("🦷 Starting Dental Office AI Receptionist Backend v2.1...")
+    print("🦷 Starting Dental Office AI Receptionist Backend v2.2...")
     print("📅 Calendar Integration: Active")
+    print("📧 Email Integration: Available")
     print("🕒 Business Hours: Mon-Sat 9AM-7PM, Sun Closed")
     print("🌍 Timezone: Asia/Karachi (PKT)")
     
@@ -566,6 +641,8 @@ if __name__ == "__main__":
     print("\n🧪 Test endpoints:")
     print("  Health: http://localhost:5000/api/health")
     print("  Today: http://localhost:5000/api/today-availability")
+    print("  Email Test: http://localhost:5000/api/test-email")
+    print("  Email Config: http://localhost:5000/api/email-config")
     print("  Weekend test: http://localhost:5000/api/test-weekend?date=2025-07-27")
     print("  Slots test: http://localhost:5000/api/available-slots?date=2025-07-28")
     print("  Timezone test: http://localhost:5000/api/test-timezone?date=2025-07-23&time=10:30")
@@ -577,12 +654,13 @@ if __name__ == "__main__":
     print("  ✅ Calendar Sync: User sees 10:30 AM, calendar gets exactly 10:30 AM PKT")
     print("  ✅ Button UX: Improved timing and user experience")
     print("  ✅ Validation: Enhanced phone/email validation")
+    print("  ✅ Email Confirmation: Added email confirmation functionality")
     print("  ✅ Debugging: Added comprehensive test endpoints")
     
     print("\n🔧 DEBUGGING NOTES:")
     print("  • Use /api/test-timezone to verify time handling")
+    print("  • Use /api/test-email to test email configuration")
     print("  • Check logs for detailed timezone conversion info")
     print("  • All times are preserved in PKT (Asia/Karachi)")
     print("  • Frontend slot data includes exact ISO timestamps")
-    
     app.run(host='0.0.0.0', port=5000, debug=True)

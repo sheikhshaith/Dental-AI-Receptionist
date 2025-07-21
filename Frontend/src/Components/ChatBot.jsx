@@ -1,6 +1,4 @@
-
-
-// components/ChatBot.jsx
+// // components/ChatBot.jsx
 import { useState, useEffect, useRef } from 'react'
 import { Send, Bot, User, Clock, Phone, Mail, AlertCircle } from 'lucide-react'
 import axios from 'axios'
@@ -204,7 +202,7 @@ const ChatBot = () => {
         }
         
         setUserData(prev => ({ ...prev, phone: input }))
-        addMessage('Perfect! And what\'s your email address? (Optional - you can type "skip" if you prefer)')
+        addMessage('"Great! What’s the best email to send your appointment details?" ')
         setCurrentStep('asking_email')
         break
 
@@ -445,7 +443,7 @@ const ChatBot = () => {
         )
         setCurrentStep('slot_selection')
       } else {
-        addMessage('Sorry, no appointments are available for the rest of today. 😔\n\nWould you like to see availability for tomorrow or the next few days?')
+        addMessage('Sorry, no appointments are available . 😔\n\nWould you like to see availability for  the next few days?')
         await showNextFewDaysAvailability()
       }
     } catch (error) {
@@ -999,3 +997,10 @@ const ChatBot = () => {
 }
 
 export default ChatBot
+
+
+
+
+
+
+

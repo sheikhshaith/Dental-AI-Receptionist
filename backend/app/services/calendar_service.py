@@ -1,3 +1,7 @@
+
+
+# calendar_service.py
+import os
 import os
 from datetime import datetime, timedelta, time, date
 import pytz
@@ -8,6 +12,22 @@ import logging
 import re
 from dateutil import parser
 
+# Add this at the top of your calendar_service.py after the imports
+
+import os
+from datetime import datetime, timedelta, time, date
+import pytz
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+import logging
+import re
+from dateutil import parser
+import locale
+
+# IMPORT EMAIL SERVICE
+from email_service import send_appointment_confirmation
+
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
@@ -16,13 +36,58 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
-# Clinic Configuration - FIXED: Use environment variables
+# Clinic Configuration - Use environment variables
 CLINIC_OPEN_HOUR = int(os.getenv('BUSINESS_HOURS_START', 9))    # 9 AM
 CLINIC_CLOSE_HOUR = int(os.getenv('BUSINESS_HOURS_END', 19))   # 7 PM
 APPOINTMENT_DURATION = int(os.getenv('APPOINTMENT_DURATION_MINUTES', 60))  # 60 minutes default
 BUFFER_TIME = int(os.getenv('BUFFER_TIME_MINUTES', 15))  # 15 minutes buffer between appointments
-# Using 'Asia/Karachi' which is the standard IANA timezone for Pakistan
-LAHORE_TZ = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Karachi'))
+
+# CRITICAL FIX: Custom timezone with correct offset
+class FixedPakistanTZ(pytz.tzinfo.BaseTzInfo):
+    """
+    Custom timezone class to fix the 32-minute offset issue
+    Forces correct +05:00 offset for Pakistan Standard Time
+    """
+    def __init__(self):
+        self.zone = 'Asia/Karachi_Fixed'
+        
+    def utcoffset(self, dt):
+        return timedelta(hours=5)  # Always +05:00, never +04:28
+    
+    def dst(self, dt):
+        return timedelta(0)  # Pakistan doesn't observe DST
+    
+    def tzname(self, dt):
+        return 'PKT'
+    
+    def localize(self, dt, is_dst=None):
+        """Localize a naive datetime to this timezone"""
+        if dt.tzinfo is not None:
+            raise ValueError("Not naive datetime (tzinfo is already set)")
+        return dt.replace(tzinfo=self)
+    
+    def normalize(self, dt):
+        """Normalize the datetime (no-op for fixed offset)"""
+        return dt
+
+# Use the fixed timezone instead of pytz
+LAHORE_TZ_ORIGINAL = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Karachi'))
+LAHORE_TZ = FixedPakistanTZ()  # Use our fixed timezone
+
+def fix_timezone_offset(dt_with_wrong_offset):
+    """
+    Convert a datetime with wrong offset (+04:28) to correct offset (+05:00)
+    """
+    if dt_with_wrong_offset.tzinfo is None:
+        # If naive, localize with correct timezone
+        return LAHORE_TZ.localize(dt_with_wrong_offset)
+    
+    # Convert to UTC first, then to correct PKT
+    utc_dt = dt_with_wrong_offset.astimezone(pytz.UTC)
+    # Add 32 minutes to compensate for the wrong offset
+    corrected_utc = utc_dt + timedelta(minutes=32)
+    # Convert back to our fixed PKT
+    return corrected_utc.astimezone(pytz.timezone('UTC')).replace(tzinfo=LAHORE_TZ) + timedelta(hours=5)
 
 def parse_natural_date(date_input):
     """
@@ -159,6 +224,7 @@ def validate_email(email):
         return True  # Email is optional
     
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
     return re.match(pattern, email) is not None
 
 def get_calendar_service():
@@ -199,13 +265,13 @@ def is_within_clinic_hours(appointment_time):
     return CLINIC_OPEN_HOUR <= hour < CLINIC_CLOSE_HOUR
 
 def is_weekend(appointment_date):
-    """Check if the date falls on weekend - FIXED: Only Sunday is closed"""
+    """Check if the date falls on weekend - Only Sunday is closed"""
     # Monday=0, Tuesday=1, ..., Saturday=5, Sunday=6
     day_of_week = appointment_date.weekday()
     
     logger.info(f"Checking weekend for {appointment_date}: weekday={day_of_week} ({'Sunday' if day_of_week == 6 else 'Saturday' if day_of_week == 5 else 'Weekday'})")
     
-    # FIXED: Only Sunday (6) is closed, Saturday (5) is open
+    # Only Sunday (6) is closed, Saturday (5) is open
     return day_of_week == 6  # Only Sunday
 
 def get_existing_appointments(date):
@@ -214,7 +280,7 @@ def get_existing_appointments(date):
         service = get_calendar_service()
         calendar_id = os.getenv("CALENDAR_ID", 'primary')
         
-        # FIXED: Set time range for the day with proper timezone
+        # Set time range for the day with proper timezone
         start_of_day = datetime.combine(date, time.min).replace(tzinfo=LAHORE_TZ)
         end_of_day = datetime.combine(date, time.max).replace(tzinfo=LAHORE_TZ)
         
@@ -252,7 +318,7 @@ def check_time_conflict(requested_start, requested_end, existing_events):
             existing_start_str = event['start']['dateTime']
             existing_end_str = event['end']['dateTime']
             
-            # FIXED: Better timezone handling
+            # Better timezone handling
             if existing_start_str.endswith('Z'):
                 existing_start = datetime.fromisoformat(existing_start_str.replace('Z', '+00:00'))
                 existing_end = datetime.fromisoformat(existing_end_str.replace('Z', '+00:00'))
@@ -298,8 +364,8 @@ def check_time_conflict(requested_start, requested_end, existing_events):
 
 def generate_alternative_slots(requested_date, duration_minutes=APPOINTMENT_DURATION):
     """
-    Generate alternative available time slots for the requested date
-    Only return slots that actually have availability
+    Generate alternative available time slots with proper business hours validation
+    Only return slots that actually have availability AND end before clinic closing time
     """
     try:
         # Don't generate slots for dates with no availability
@@ -330,20 +396,35 @@ def generate_alternative_slots(requested_date, duration_minutes=APPOINTMENT_DURA
             if earliest_time > current_time:
                 current_time = earliest_time.replace(minute=0 if earliest_time.minute < 30 else 30, second=0, microsecond=0)
         
+        logger.info(f"🕐 SLOT GENERATION:")
+        logger.info(f"  Start time: {current_time.strftime('%H:%M')}")
+        logger.info(f"  End time (clinic closes): {end_time.strftime('%H:%M')}")
+        logger.info(f"  Appointment duration: {duration_minutes} minutes")
+        
+        # Ensure appointment can complete BEFORE clinic closing time
         while current_time + timedelta(minutes=duration_minutes) <= end_time:
             slot_end = current_time + timedelta(minutes=duration_minutes)
+            
+            # Check that appointment ends before clinic closes
+            if slot_end > end_time:
+                logger.info(f"  ❌ Slot {current_time.strftime('%H:%M')} would end at {slot_end.strftime('%H:%M')} (past closing time {end_time.strftime('%H:%M')})")
+                break
             
             # Check if this slot conflicts with existing appointments
             has_conflict, conflicting_event = check_time_conflict(current_time, slot_end, existing_events)
             
             if not has_conflict:
+                # Store timezone-aware ISO strings for exact timing preservation
                 slots.append({
-                    'start_time': current_time.isoformat(),  # Store as ISO string with timezone
+                    'start_time': current_time.isoformat(),  # ISO string with timezone
                     'end_time': slot_end.isoformat(),
-                    'formatted_time': current_time.strftime('%I:%M %p'),
-                    'time_24h': current_time.strftime('%H:%M')  # Add 24-hour format for easier matching
+                    'formatted_time': current_time.strftime('%I:%M %p'),  # Display format
+                    'time_24h': current_time.strftime('%H:%M'),  # 24-hour format for backend
+                    'timezone': 'Asia/Karachi',  # Explicit timezone reference
+                    'utc_start': current_time.astimezone(pytz.UTC).isoformat(),  # UTC for debugging
+                    'utc_end': slot_end.astimezone(pytz.UTC).isoformat()
                 })
-                logger.info(f"  ✓ Available slot: {current_time.strftime('%I:%M %p')}")
+                logger.info(f"  ✓ Available slot: {current_time.strftime('%I:%M %p')} - {slot_end.strftime('%I:%M %p')} (ends before {end_time.strftime('%H:%M')})")
             else:
                 conflicting_summary = conflicting_event.get('summary', 'Unknown appointment') if conflicting_event else 'Unknown conflict'
                 logger.info(f"  ✗ Conflict with: {conflicting_summary}")
@@ -352,15 +433,26 @@ def generate_alternative_slots(requested_date, duration_minutes=APPOINTMENT_DURA
             current_time += timedelta(minutes=30)
         
         logger.info(f"Generated {len(slots)} available slots for {requested_date}")
-        return slots
+        
+        # Additional validation: Double-check all slots end before closing time
+        valid_slots = []
+        for slot in slots:
+            slot_end_time = datetime.fromisoformat(slot['end_time'])
+            if slot_end_time <= end_time:
+                valid_slots.append(slot)
+            else:
+                logger.warning(f"⚠️ Removing invalid slot that ends past closing time: {slot['formatted_time']}")
+        
+        logger.info(f"Final valid slots: {len(valid_slots)}")
+        return valid_slots
         
     except Exception as e:
         logger.error(f"Error generating alternative slots: {e}")
         return []
 
-def book_appointment(patient_name, patient_phone, appointment_date, appointment_time, duration_minutes=APPOINTMENT_DURATION, appointment_type="General Checkup"):
+def book_appointment(patient_name, patient_phone, appointment_date, appointment_time, duration_minutes=APPOINTMENT_DURATION, appointment_type="General Checkup", patient_email=None):
     """
-    Book an appointment with conflict checking and validation
+    ENHANCED: Book an appointment with email confirmation support
     """
     try:
         # Input validation first
@@ -377,35 +469,74 @@ def book_appointment(patient_name, patient_phone, appointment_date, appointment_
                 'message': 'Please provide a valid phone number (e.g., +92-321-1234567 or 0321-1234567).'
             }
         
-        # Combine date and time with proper timezone
-        # First create a naive datetime in local time
-        naive_datetime = datetime.combine(appointment_date, appointment_time)
-        # Localize to LAHORE_TZ
-        appointment_datetime = LAHORE_TZ.localize(naive_datetime)
-        appointment_end = appointment_datetime + timedelta(minutes=duration_minutes)
+        # CRITICAL FIX: Create timezone-naive datetime and format it properly
+        logger.info(f"🔍 APPOINTMENT BOOKING - INPUT ANALYSIS:")
+        logger.info(f"  Input appointment_date: {appointment_date} (type: {type(appointment_date)})")
+        logger.info(f"  Input appointment_time: {appointment_time} (type: {type(appointment_time)})")
+        logger.info(f"  Patient email: {patient_email}")
         
-        # Log the time in both local and UTC for debugging
-        logger.info(f"🔍 BOOKING REQUEST (Local): {appointment_datetime.strftime('%Y-%m-%d %H:%M %Z')} - {appointment_end.strftime('%H:%M %Z')}")
-        logger.info(f"🔍 BOOKING REQUEST (UTC): {appointment_datetime.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M %Z')} - {appointment_end.astimezone(pytz.UTC).strftime('%H:%M %Z')}")
+        if isinstance(appointment_time, time):
+            # Standard time object - combine with date (NO timezone conversion)
+            naive_datetime = datetime.combine(appointment_date, appointment_time)
+        elif isinstance(appointment_time, str):
+            # String time - parse and combine
+            try:
+                if ':' in appointment_time:
+                    hour, minute = appointment_time.split(':')
+                    time_obj = time(int(hour), int(minute))
+                    naive_datetime = datetime.combine(appointment_date, time_obj)
+                else:
+                    raise ValueError(f"Invalid time string format: {appointment_time}")
+            except Exception as e:
+                logger.error(f"Error parsing time string: {e}")
+                return {
+                    'success': False,
+                    'message': f'Invalid time format: {appointment_time}'
+                }
+        elif isinstance(appointment_time, datetime):
+            # Already a datetime object - use as is but remove timezone
+            naive_datetime = appointment_time.replace(tzinfo=None)
+        else:
+            logger.error(f"Unsupported appointment_time type: {type(appointment_time)}")
+            return {
+                'success': False,
+                'message': f'Unsupported time format: {type(appointment_time)}'
+            }
         
-        # Validation checks
-        validation_result = validate_appointment_request(appointment_datetime, appointment_end)
+        naive_end_datetime = naive_datetime + timedelta(minutes=duration_minutes)
+        
+        # For validation purposes, create timezone-aware versions
+        appointment_datetime_tz = LAHORE_TZ.localize(naive_datetime)
+        appointment_end_tz = LAHORE_TZ.localize(naive_end_datetime)
+        
+        # Enhanced logging for debugging
+        logger.info(f"🔍 FINAL APPOINTMENT TIMING:")
+        logger.info(f"  Patient: {patient_name}")
+        logger.info(f"  Phone: {patient_phone}")
+        logger.info(f"  Email: {patient_email or 'Not provided'}")
+        logger.info(f"  Naive Start: {naive_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"  Naive End: {naive_end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"  For validation (PKT): {appointment_datetime_tz.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        logger.info(f"  Duration: {duration_minutes} minutes")
+        
+        # Validation checks using timezone-aware versions
+        validation_result = validate_appointment_request(appointment_datetime_tz, appointment_end_tz)
         if not validation_result['valid']:
             return validation_result
         
-        # ULTRA STRICT CONFLICT CHECKING
+        # Conflict checking using timezone-aware versions
         existing_events = get_existing_appointments(appointment_date)
-        logger.info(f"🔍 BOOKING VALIDATION: Checking {appointment_datetime.strftime('%H:%M')} - {appointment_end.strftime('%H:%M')}")
+        logger.info(f"🔍 BOOKING VALIDATION: Checking {appointment_datetime_tz.strftime('%H:%M')} - {appointment_end_tz.strftime('%H:%M')}")
         logger.info(f"Found {len(existing_events)} existing appointments to check against")
         
-        has_conflict, conflicting_event = check_time_conflict(appointment_datetime, appointment_end, existing_events)
+        has_conflict, conflicting_event = check_time_conflict(appointment_datetime_tz, appointment_end_tz, existing_events)
         
         if has_conflict:
             conflicting_start = conflicting_event['start']['dateTime'] if conflicting_event else 'Unknown'
             conflicting_summary = conflicting_event.get('summary', 'Unknown appointment') if conflicting_event else 'Unknown'
             
             logger.error(f"🚨 APPOINTMENT BOOKING BLOCKED!")
-            logger.error(f"  ❌ Requested: {appointment_datetime.strftime('%H:%M')} - {appointment_end.strftime('%H:%M')}")
+            logger.error(f"  ❌ Requested: {appointment_datetime_tz.strftime('%H:%M')} - {appointment_end_tz.strftime('%H:%M')}")
             logger.error(f"  ⚠️  Conflicts with: {conflicting_summary}")
             
             # Generate alternatives
@@ -413,11 +544,11 @@ def book_appointment(patient_name, patient_phone, appointment_date, appointment_
             
             return {
                 'success': False,
-                'message': f'🚫 BOOKING DENIED: Time slot {appointment_time.strftime("%I:%M %p")} conflicts with existing appointment "{conflicting_summary}". Please choose a different time.',
+                'message': f'🚫 BOOKING DENIED: Time slot {appointment_datetime_tz.strftime("%I:%M %p")} conflicts with existing appointment "{conflicting_summary}". Please choose a different time.',
                 'conflict_details': {
                     'existing_appointment': conflicting_summary,
                     'existing_time': conflicting_start,
-                    'requested_time': appointment_time.strftime('%I:%M %p'),
+                    'requested_time': appointment_datetime_tz.strftime('%I:%M %p'),
                     'reason': 'Time slot overlap detected'
                 },
                 'alternatives': alternatives[:5],
@@ -427,28 +558,39 @@ def book_appointment(patient_name, patient_phone, appointment_date, appointment_
         
         logger.info("✅ No conflicts detected - proceeding with appointment creation...")
         
-        # Create the appointment - FIXED: Proper timezone specification
+        # CRITICAL FIX: Create calendar event with timezone-naive datetime strings
         service = get_calendar_service()
         calendar_id = os.getenv("CALENDAR_ID", 'primary')
         
+        # Format datetime without timezone info - let Google handle it with explicit timezone
+        start_datetime_str = naive_datetime.strftime('%Y-%m-%dT%H:%M:%S')
+        end_datetime_str = naive_end_datetime.strftime('%Y-%m-%dT%H:%M:%S')
+        
+        # Create the event structure
         event = {
             'summary': f'🦷 {appointment_type} - {patient_name}',
             'location': os.getenv('BUSINESS_ADDRESS', 'Bright Smile Dental Office'),
             'description': f'''
 Patient: {patient_name}
 Phone: {patient_phone}
+{f"Email: {patient_email}" if patient_email else "Email: Not provided"}
 Type: {appointment_type}
 Duration: {duration_minutes} minutes
 
 Booked via AI Receptionist
+
+TIMING VERIFICATION:
+- User Selected: {naive_datetime.strftime('%I:%M %p')}
+- Local Time: {start_datetime_str}
+- Timezone: Asia/Karachi
             '''.strip(),
             'start': {
-                'dateTime': appointment_datetime.isoformat(),
-                'timeZone': 'Asia/Karachi',  # Use standard IANA timezone name
+                'dateTime': start_datetime_str,  # NO timezone in the datetime string
+                'timeZone': 'Asia/Karachi'       # Explicit timezone specification
             },
             'end': {
-                'dateTime': appointment_end.isoformat(),
-                'timeZone': 'Asia/Karachi',  # Use standard IANA timezone name
+                'dateTime': end_datetime_str,    # NO timezone in the datetime string
+                'timeZone': 'Asia/Karachi'       # Explicit timezone specification
             },
             'attendees': [
                 {'email': os.getenv('BUSINESS_EMAIL', 'contact@brightsmile.com')}
@@ -456,14 +598,56 @@ Booked via AI Receptionist
             'reminders': {
                 'useDefault': False,
                 'overrides': [
-                    {'method': 'popup', 'minutes': 15}  # 15 minutes before
+                    {'method': 'popup', 'minutes': 15}
                 ]
             }
         }
         
+        # Add patient email to attendees if provided
+        if patient_email and validate_email(patient_email):
+            event['attendees'].append({'email': patient_email})
+        
+        # Comprehensive logging before creating the event
+        logger.info(f"📅 GOOGLE CALENDAR EVENT CREATION:")
+        logger.info(f"  Summary: {event['summary']}")
+        logger.info(f"  Start DateTime: {event['start']['dateTime']}")
+        logger.info(f"  End DateTime: {event['end']['dateTime']}")
+        logger.info(f"  TimeZone: {event['start']['timeZone']}")
+        logger.info(f"  Expected Calendar Display: {naive_datetime.strftime('%I:%M %p')} - {naive_end_datetime.strftime('%I:%M %p')} PKT")
+        
+        # Create the calendar event
         created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
         
-        logger.info(f"✅ Appointment booked successfully for {patient_name} at {appointment_datetime.strftime('%Y-%m-%d %H:%M %Z')}")
+        # Success logging
+        logger.info(f"✅ APPOINTMENT CREATED SUCCESSFULLY!")
+        logger.info(f"  Google Calendar Event ID: {created_event.get('id')}")
+        logger.info(f"  Event URL: {created_event.get('htmlLink')}")
+        logger.info(f"  User expects to see: {naive_datetime.strftime('%I:%M %p')} - {naive_end_datetime.strftime('%I:%M %p')}")
+        
+        # 🆕 SEND EMAIL CONFIRMATION IF EMAIL PROVIDED
+        email_result = None
+        if patient_email and validate_email(patient_email):
+            logger.info(f"📧 SENDING CONFIRMATION EMAIL to {patient_email}")
+            
+            appointment_details = {
+                'type': appointment_type,
+                'date': appointment_date.strftime('%B %d, %Y'),
+                'time': naive_datetime.strftime('%I:%M %p'),
+                'duration': f'{duration_minutes} minutes',
+                'event_id': created_event.get('id'),
+                'event_url': created_event.get('htmlLink')
+            }
+            
+            email_result = send_appointment_confirmation(
+                patient_name=patient_name,
+                patient_email=patient_email,
+                appointment_details=appointment_details
+            )
+            
+            if email_result.get('success'):
+                logger.info(f"✅ Confirmation email sent successfully to {patient_email}")
+            else:
+                logger.warning(f"⚠️ Failed to send confirmation email: {email_result.get('message')}")
         
         return {
             'success': True,
@@ -471,11 +655,28 @@ Booked via AI Receptionist
             'appointment_details': {
                 'patient_name': patient_name,
                 'date': appointment_date.strftime('%B %d, %Y'),
-                'time': appointment_time.strftime('%I:%M %p'),
+                'time': naive_datetime.strftime('%I:%M %p'),
                 'type': appointment_type,
                 'duration': f'{duration_minutes} minutes',
                 'event_id': created_event.get('id'),
-                'event_url': created_event.get('htmlLink')
+                'event_url': created_event.get('htmlLink'),
+                'timezone': 'Asia/Karachi'
+            },
+            'email_confirmation': {
+                'sent': email_result.get('success', False) if email_result else False,
+                'recipient': patient_email if patient_email else None,
+                'message': email_result.get('message', 'No email provided') if email_result else 'No email provided'
+            },
+            'debug_info': {
+                'naive_datetime': naive_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+                'start_datetime_str': start_datetime_str,
+                'end_datetime_str': end_datetime_str,
+                'timezone': 'Asia/Karachi',
+                'input_validation': {
+                    'original_date': str(appointment_date),
+                    'original_time': str(appointment_time),
+                    'original_time_type': str(type(appointment_time))
+                }
             }
         }
         
@@ -518,7 +719,8 @@ def validate_appointment_request(start_datetime, end_datetime):
         }
     
     # Check if appointment end time exceeds clinic hours
-    if end_datetime.hour >= CLINIC_CLOSE_HOUR:
+    clinic_close_time = datetime.combine(start_datetime.date(), time(CLINIC_CLOSE_HOUR, 0)).replace(tzinfo=LAHORE_TZ)
+    if end_datetime > clinic_close_time:
         return {
             'valid': False,
             'success': False,
@@ -628,11 +830,40 @@ def get_next_few_days_availability(days=3):
     
     return availability
 
-# Test function
+def debug_timezone_handling(date_str, time_str):
+    """Debug function to test timezone handling"""
+    try:
+        # Parse inputs
+        test_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        test_time = datetime.strptime(time_str, '%H:%M').time()
+        
+        # Create timezone-aware datetime
+        naive_dt = datetime.combine(test_date, test_time)
+        pkt_dt = LAHORE_TZ.localize(naive_dt)
+        utc_dt = pkt_dt.astimezone(pytz.UTC)
+        
+        return {
+            'input_date': date_str,
+            'input_time': time_str,
+            'naive_datetime': naive_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            'pkt_datetime': pkt_dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
+            'utc_datetime': utc_dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
+            'pkt_iso': pkt_dt.isoformat(),
+            'utc_iso': utc_dt.isoformat(),
+            'calendar_event_format': {
+                'dateTime': pkt_dt.isoformat(),
+                'timeZone': 'Asia/Karachi'
+            }
+        }
+        
+    except Exception as e:
+        return {'error': str(e)}
+
+# Test function with enhanced timezone validation
 def test_calendar_connection():
-    """Test calendar connection and permissions"""
-    print("🔍 TESTING CALENDAR CONNECTION")
-    print("="*50)
+    """Test calendar connection and timezone handling with comprehensive validation"""
+    print("🔍 TESTING CALENDAR CONNECTION WITH TIMEZONE VALIDATION")
+    print("="*60)
     
     try:
         service = get_calendar_service()
@@ -644,7 +875,8 @@ def test_calendar_connection():
         
         # Test timezone handling
         now = datetime.now(LAHORE_TZ)
-        print(f"✅ Current time in PKT: {now.strftime('%Y-%m-%d %H:%M %Z')}")
+        print(f"✅ Current time in PKT: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        print(f"✅ Current time in UTC: {now.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S %Z')}")
         
         # Test today's availability
         today_avail = check_today_availability()
@@ -656,6 +888,65 @@ def test_calendar_connection():
             parsed = parse_natural_date(test_date)
             print(f"✅ '{test_date}' -> {parsed}")
         
+        # Test slot generation with timezone info
+        today = now.date()
+        tomorrow = today + timedelta(days=1)
+        
+        if not is_weekend(tomorrow):
+            slots = generate_alternative_slots(tomorrow)
+            print(f"✅ Tomorrow's slots: {len(slots)} available")
+            
+            if slots:
+                first_slot = slots[0]
+                print(f"   First slot example:")
+                print(f"     Display time: {first_slot['formatted_time']}")
+                print(f"     ISO start: {first_slot['start_time']}")
+                print(f"     24h format: {first_slot['time_24h']}")
+                print(f"     Timezone: {first_slot['timezone']}")
+                
+                # Test timezone debugging
+                slot_dt = datetime.fromisoformat(first_slot['start_time'])
+                print(f"     Parsed PKT: {slot_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                print(f"     Converted UTC: {slot_dt.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        
+        # Test appointment booking with sample data
+        print("\n🧪 Testing timezone handling...")
+        test_result = debug_timezone_handling(tomorrow.strftime('%Y-%m-%d'), '13:30')
+        if 'error' not in test_result:
+            print(f"   Input: {test_result['input_date']} {test_result['input_time']}")
+            print(f"   PKT: {test_result['pkt_datetime']}")
+            print(f"   UTC: {test_result['utc_datetime']}")
+            print(f"   Calendar format: {test_result['calendar_event_format']}")
+        
+        # Test weekend logic
+        print("\n🗓️ Testing weekend logic...")
+        test_sunday = today + timedelta(days=(6 - today.weekday()) % 7)
+        if test_sunday.weekday() != 6:
+            test_sunday += timedelta(days=7 - test_sunday.weekday() + 6)
+        
+        print(f"   Sunday test date: {test_sunday} (weekday: {test_sunday.weekday()})")
+        print(f"   Is weekend: {is_weekend(test_sunday)}")
+        
+        sunday_slots = generate_alternative_slots(test_sunday)
+        print(f"   Sunday slots generated: {len(sunday_slots)} (should be 0)")
+        
+        # 🆕 TEST EMAIL CONFIGURATION
+        print("\n📧 Testing email configuration...")
+        try:
+            from email_service import test_email_configuration
+            email_test_result = test_email_configuration()
+            if email_test_result['success']:
+                print("✅ Email service configured correctly")
+                print(f"   SMTP Server: {email_test_result['details']['smtp_server']}")
+                print(f"   From Email: {email_test_result['details']['from_email']}")
+            else:
+                print(f"⚠️ Email service not configured: {email_test_result['message']}")
+        except ImportError:
+            print("⚠️ Email service module not found")
+        except Exception as e:
+            print(f"⚠️ Email service test error: {e}")
+        
+        print("\n✅ All tests completed successfully!")
         return True
         
     except Exception as e:
@@ -664,5 +955,185 @@ def test_calendar_connection():
         traceback.print_exc()
         return False
 
+# Additional utility functions for enhanced functionality
+
+def get_appointment_by_id(event_id):
+    """Get a specific appointment by Google Calendar event ID"""
+    try:
+        service = get_calendar_service()
+        calendar_id = os.getenv("CALENDAR_ID", 'primary')
+        
+        event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        
+        return {
+            'success': True,
+            'event': event,
+            'summary': event.get('summary', 'No title'),
+            'start': event.get('start', {}).get('dateTime', 'No start time'),
+            'end': event.get('end', {}).get('dateTime', 'No end time'),
+            'description': event.get('description', 'No description')
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching appointment {event_id}: {e}")
+        return {
+            'success': False,
+            'message': f'Could not retrieve appointment: {str(e)}'
+        }
+
+def cancel_appointment(event_id, reason="Cancelled by patient"):
+    """Cancel an existing appointment"""
+    try:
+        service = get_calendar_service()
+        calendar_id = os.getenv("CALENDAR_ID", 'primary')
+        
+        # Get the event first
+        event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        
+        # Update the event to mark as cancelled
+        event['summary'] = f"[CANCELLED] {event.get('summary', '')}"
+        event['description'] = f"{event.get('description', '')}\n\nCancellation Reason: {reason}\nCancelled at: {datetime.now(LAHORE_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        
+        # Update the event
+        updated_event = service.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
+        
+        logger.info(f"✅ Appointment {event_id} cancelled successfully")
+        
+        return {
+            'success': True,
+            'message': 'Appointment cancelled successfully',
+            'event_id': event_id,
+            'updated_event': updated_event
+        }
+        
+    except Exception as e:
+        logger.error(f"Error cancelling appointment {event_id}: {e}")
+        return {
+            'success': False,
+            'message': f'Could not cancel appointment: {str(e)}'
+        }
+
+def reschedule_appointment(event_id, new_date, new_time, duration_minutes=APPOINTMENT_DURATION):
+    """Reschedule an existing appointment to a new date and time"""
+    try:
+        service = get_calendar_service()
+        calendar_id = os.getenv("CALENDAR_ID", 'primary')
+        
+        # Get the existing event
+        event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        
+        # Create new datetime with proper timezone handling
+        if isinstance(new_time, time):
+            naive_datetime = datetime.combine(new_date, new_time)
+            new_datetime = LAHORE_TZ.localize(naive_datetime)
+        else:
+            if new_time.tzinfo is None:
+                new_datetime = LAHORE_TZ.localize(new_time)
+            else:
+                new_datetime = new_time.astimezone(LAHORE_TZ)
+        
+        new_end_datetime = new_datetime + timedelta(minutes=duration_minutes)
+        
+        # Check for conflicts at the new time
+        existing_events = get_existing_appointments(new_date)
+        has_conflict, conflicting_event = check_time_conflict(new_datetime, new_end_datetime, existing_events)
+        
+        if has_conflict:
+            return {
+                'success': False,
+                'message': f'Cannot reschedule to {new_datetime.strftime("%I:%M %p")} - conflicts with existing appointment',
+                'conflict_event': conflicting_event.get('summary', 'Unknown') if conflicting_event else 'Unknown'
+            }
+        
+        # Update the event with new timing
+        event['start'] = {
+            'dateTime': new_datetime.isoformat(),
+            'timeZone': 'Asia/Karachi'
+        }
+        event['end'] = {
+            'dateTime': new_end_datetime.isoformat(),
+            'timeZone': 'Asia/Karachi'
+        }
+        
+        # Add rescheduling note to description
+        original_description = event.get('description', '')
+        event['description'] = f"{original_description}\n\nRescheduled at: {datetime.now(LAHORE_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}\nNew time: {new_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        
+        # Update the event
+        updated_event = service.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
+        
+        logger.info(f"✅ Appointment {event_id} rescheduled successfully to {new_datetime.strftime('%Y-%m-%d %H:%M %Z')}")
+        
+        return {
+            'success': True,
+            'message': 'Appointment rescheduled successfully',
+            'event_id': event_id,
+            'new_datetime': new_datetime.strftime('%Y-%m-%d %H:%M %Z'),
+            'updated_event': updated_event
+        }
+        
+    except Exception as e:
+        logger.error(f"Error rescheduling appointment {event_id}: {e}")
+        return {
+            'success': False,
+            'message': f'Could not reschedule appointment: {str(e)}'
+        }
+
+def get_appointments_for_date_range(start_date, end_date):
+    """Get all appointments within a date range"""
+    try:
+        service = get_calendar_service()
+        calendar_id = os.getenv("CALENDAR_ID", 'primary')
+        
+        # Convert dates to timezone-aware datetimes
+        start_datetime = datetime.combine(start_date, time.min).replace(tzinfo=LAHORE_TZ)
+        end_datetime = datetime.combine(end_date, time.max).replace(tzinfo=LAHORE_TZ)
+        
+        events_result = service.events().list(
+            calendarId=calendar_id,
+            timeMin=start_datetime.isoformat(),
+            timeMax=end_datetime.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        
+        # Process events to extract relevant information
+        appointments = []
+        for event in events:
+            if 'dateTime' in event.get('start', {}):
+                start_dt = datetime.fromisoformat(event['start']['dateTime'])
+                if start_dt.tzinfo != LAHORE_TZ:
+                    start_dt = start_dt.astimezone(LAHORE_TZ)
+                
+                appointments.append({
+                    'id': event.get('id'),
+                    'summary': event.get('summary', 'No title'),
+                    'start_datetime': start_dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                    'start_time': start_dt.strftime('%I:%M %p'),
+                    'date': start_dt.strftime('%B %d, %Y'),
+                    'description': event.get('description', ''),
+                    'status': event.get('status', 'confirmed')
+                })
+        
+        logger.info(f"Found {len(appointments)} appointments between {start_date} and {end_date}")
+        
+        return {
+            'success': True,
+            'appointments': appointments,
+            'count': len(appointments),
+            'date_range': f"{start_date.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching appointments for date range: {e}")
+        return {
+            'success': False,
+            'message': f'Could not retrieve appointments: {str(e)}'
+        }
+
 if __name__ == "__main__":
     test_calendar_connection()
+
+

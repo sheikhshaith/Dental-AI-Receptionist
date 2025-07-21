@@ -1,85 +1,4 @@
-# """
-# Configuration settings for the Dental Office AI Receptionist
-# """
-# import os
-# from datetime import timedelta
-# from dotenv import load_dotenv
 
-# load_dotenv()
-
-# class Config:
-#     """Base configuration class"""
-    
-#     # Flask Configuration
-#     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-key-change-in-production'
-    
-#     # Google APIs - FIXED: Use environment variable name, not the key value
-#     GOOGLE_GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_GEMINI_API_KEY')
-#     GOOGLE_CALENDAR_CREDENTIALS_PATH = os.environ.get('GOOGLE_CALENDAR_CREDENTIALS_PATH', 'credentials/credentials.json')
-#     GOOGLE_CALENDAR_TOKEN_PATH = os.environ.get('GOOGLE_CALENDAR_TOKEN_PATH', 'credentials/token.json')
-#     CALENDAR_ID = os.environ.get('CALENDAR_ID', 'primary')
-    
-#     # Business Information
-#     BUSINESS_NAME = os.environ.get('BUSINESS_NAME', 'Bright Smile Dental Office')
-#     BUSINESS_PHONE = os.environ.get('BUSINESS_PHONE', '(555) 123-4567')
-#     BUSINESS_EMAIL = os.environ.get('BUSINESS_EMAIL', 'contact@brightsmile.com')
-#     BUSINESS_ADDRESS = os.environ.get('BUSINESS_ADDRESS', '123 Main St, City, State 12345')
-    
-#     # Schedule Configuration
-#     BUSINESS_HOURS_START = int(os.environ.get('BUSINESS_HOURS_START', 9))
-#     BUSINESS_HOURS_END = int(os.environ.get('BUSINESS_HOURS_END', 17))
-#     LUNCH_BREAK_START = int(os.environ.get('LUNCH_BREAK_START', 12))
-#     LUNCH_BREAK_END = int(os.environ.get('LUNCH_BREAK_END', 13))
-#     APPOINTMENT_DURATION_MINUTES = int(os.environ.get('APPOINTMENT_DURATION_MINUTES', 60))
-#     BUFFER_TIME_MINUTES = int(os.environ.get('BUFFER_TIME_MINUTES', 15))
-#     TIMEZONE = os.environ.get('TIMEZONE', 'America/New_York')
-    
-#     # System Configuration
-#     MAX_SESSIONS = int(os.environ.get('MAX_SESSIONS', 1000))
-#     SESSION_TIMEOUT = timedelta(minutes=int(os.environ.get('SESSION_TIMEOUT_MINUTES', 30)))
-#     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
-    
-#     # Appointment Types
-#     APPOINTMENT_TYPES = {
-#         'cleaning': 'Regular Cleaning',
-#         'checkup': 'Dental Checkup',
-#         'consultation': 'Consultation',
-#         'emergency': 'Emergency Visit',
-#         'filling': 'Dental Filling',
-#         'extraction': 'Tooth Extraction',
-#         'root_canal': 'Root Canal',
-#         'crown': 'Crown Placement',
-#         'whitening': 'Teeth Whitening',
-#         'orthodontics': 'Orthodontic Consultation'
-#     }
-    
-#     @classmethod
-#     def validate_config(cls):
-#         """Validate required configuration"""
-#         required_vars = [
-#             'GOOGLE_GEMINI_API_KEY',
-#             'GOOGLE_CALENDAR_CREDENTIALS_PATH'
-#         ]
-        
-#         missing_vars = [var for var in required_vars if not getattr(cls, var)]
-        
-#         if missing_vars:
-#             raise ValueError(f"Missing required environment variables: {missing_vars}")
-
-# class DevelopmentConfig(Config):
-#     """Development configuration"""
-#     DEBUG = True
-#     LOG_LEVEL = 'DEBUG'
-
-# class ProductionConfig(Config):
-#     """Production configuration"""
-#     DEBUG = False
-#     LOG_LEVEL = 'INFO'
-
-# class TestingConfig(Config):
-#     """Testing configuration"""
-#     TESTING = True
-#     LOG_LEVEL = 'DEBUG'
 # config.py
 
 """ Configuration settings for the Dental Office AI Receptionist """
@@ -200,4 +119,6 @@ def get_config():
     elif env == 'testing':
         return TestingConfig
     else:
-        return DevelopmentConfig
+        return DevelopmentConfig 
+
+
